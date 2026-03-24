@@ -1,3 +1,3 @@
-"""Kalshi Trading Bot - High-probability market scanner and trader."""
+"""Kalshi Trading Bot — Fast Compounding + Long-Term Allocation Engine."""
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
