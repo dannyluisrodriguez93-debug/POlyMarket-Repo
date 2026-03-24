@@ -1,25 +1,24 @@
 #!/usr/bin/env python3
-"""Polymarket Trading Bot — interactive CLI entry point."""
+"""Kalshi Trading Bot — interactive CLI entry point."""
 
 import sys
 import logging
 
-from polymarket_bot.config import Config
-from polymarket_bot.client import create_client, fetch_all_markets
-from polymarket_bot.market_analyzer import (
+from kalshi_bot.config import Config
+from kalshi_bot.client import KalshiClient
+from kalshi_bot.market_analyzer import (
     analyze_all,
     search_markets,
-    get_market_details,
     Opportunity,
 )
-from polymarket_bot.trader import (
+from kalshi_bot.trader import (
     place_limit_order,
     place_market_order,
     get_open_orders,
     cancel_order,
     cancel_all_orders,
 )
-from polymarket_bot.display import (
+from kalshi_bot.display import (
     console,
     show_banner,
     show_markets_table,
@@ -28,6 +27,7 @@ from polymarket_bot.display import (
     prompt_approval,
     show_trade_result,
     show_orders_table,
+    show_balance,
     show_error,
     show_info,
     show_success,
@@ -42,7 +42,7 @@ logging.basicConfig(
         logging.StreamHandler(sys.stderr),
     ],
 )
-logger = logging.getLogger("polymarket_bot")
+logger = logging.getLogger("kalshi_bot")
 
 
 def cmd_help():
@@ -50,14 +50,15 @@ def cmd_help():
         "\n[bold]Commands:[/bold]\n"
         "  [cyan]markets[/cyan]           — Browse all active markets\n"
         "  [cyan]search <query>[/cyan]    — Search markets by keyword\n"
-        "  [cyan]analyze[/cyan]           — Run all analysis strategies\n"
+        "  [cyan]analyze[/cyan]           — Scan for 80%+ probability opportunities\n"
         "  [cyan]opportunities[/cyan]     — Show last analysis results\n"
         "  [cyan]detail <#>[/cyan]        — Show detail for opportunity #\n"
-        "  [cyan]buy <#> [size] [price][/cyan] — Place limit buy on opportunity #\n"
-        "  [cyan]market-buy <#> [amount][/cyan] — Place market buy on opportunity #\n"
+        "  [cyan]buy <#> [count] [price][/cyan] — Place limit buy on opportunity #\n"
+        "  [cyan]market-buy <#> [count][/cyan]  — Place market buy on opportunity #\n"
         "  [cyan]orders[/cyan]            — Show open orders\n"
         "  [cyan]cancel <id>[/cyan]       — Cancel an order by ID\n"
         "  [cyan]cancel-all[/cyan]        — Cancel all open orders\n"
+        "  [cyan]balance[/cyan]           — Show account balance\n"
         "  [cyan]refresh[/cyan]           — Re-fetch all markets\n"
         "  [cyan]help[/cyan]              — Show this help\n"
         "  [cyan]quit[/cyan]              — Exit the bot\n"
@@ -78,30 +79,40 @@ def main():
         )
         sys.exit(1)
 
-    # Connect
-    show_info("Connecting to Polymarket CLOB API...")
+    # Connect and authenticate
+    show_info("Connecting to Kalshi API...")
+    client = KalshiClient(config)
     try:
-        client = create_client(config)
-        ok = client.get_ok()
-        show_success(f"Connected! Server status: {ok}")
+        if client.login():
+            show_success("Authenticated with Kalshi!")
+        else:
+            show_error("Authentication failed. Check your credentials.")
+            sys.exit(1)
     except Exception as e:
         show_error(f"Failed to connect: {e}")
         sys.exit(1)
 
+    # Show balance
+    try:
+        balance = client.get_balance()
+        show_balance(balance)
+    except Exception:
+        show_info("Could not fetch balance (non-critical).")
+
     # Fetch markets
-    show_info("Fetching markets...")
-    markets = fetch_all_markets(client)
-    show_success(f"Loaded {len(markets)} markets.")
+    show_info("Fetching all Kalshi markets...")
+    markets = client.fetch_all_markets()
+    show_success(f"Loaded {len(markets)} open markets.")
 
     # State
     all_opportunities: list[Opportunity] = []
-    market_page = 0
+    market_page = 1
 
     cmd_help()
 
     while True:
         try:
-            raw = console.input("\n[bold cyan]bot>[/bold cyan] ").strip()
+            raw = console.input("\n[bold cyan]kalshi>[/bold cyan] ").strip()
         except (EOFError, KeyboardInterrupt):
             console.print("\n[dim]Goodbye![/dim]")
             break
@@ -115,12 +126,9 @@ def main():
 
         # ---- Markets ----
         if cmd == "markets":
-            has_more = show_markets_table(markets, market_page)
-            if has_more:
-                console.print("[dim]Type 'markets' again for next page, or 'search <query>'[/dim]")
-                market_page += 1
-            else:
-                market_page = 0
+            page = int(arg) if arg.isdigit() else market_page
+            show_markets_table(markets, page=page)
+            market_page = page + 1
 
         elif cmd == "search":
             if not arg:
@@ -132,27 +140,27 @@ def main():
 
         # ---- Analysis ----
         elif cmd == "analyze":
-            show_info("Analyzing markets...")
-            results = analyze_all(client, markets)
+            show_info(f"Scanning for markets with >= {config.min_probability:.0%} probability...")
+            results = analyze_all(markets, config.min_probability)
             all_opportunities.clear()
 
             for strategy_name, opps in results.items():
-                show_opportunities(opps, strategy_name.replace("_", " ").title())
                 all_opportunities.extend(opps)
 
+            show_opportunities(all_opportunities)
             show_success(f"Total opportunities: {len(all_opportunities)}")
 
         elif cmd == "opportunities":
             if not all_opportunities:
                 show_info("No opportunities yet. Run 'analyze' first.")
             else:
-                show_opportunities(all_opportunities, "All")
+                show_opportunities(all_opportunities)
 
         elif cmd == "detail":
             try:
                 idx = int(arg) - 1
                 if 0 <= idx < len(all_opportunities):
-                    show_opportunity_detail(all_opportunities[idx])
+                    show_opportunity_detail(all_opportunities[idx], idx + 1)
                 else:
                     show_error(f"Invalid #. Range: 1-{len(all_opportunities)}")
             except ValueError:
@@ -168,22 +176,22 @@ def main():
                     continue
 
                 opp = all_opportunities[idx]
-                size = float(buy_parts[1]) if len(buy_parts) > 1 else config.default_order_size
-                price = float(buy_parts[2]) if len(buy_parts) > 2 else opp.current_price
+                count = int(buy_parts[1]) if len(buy_parts) > 1 else config.default_order_size
+                price_cents = int(buy_parts[2]) if len(buy_parts) > 2 else opp.price_cents
 
-                if size > config.max_order_size:
-                    show_error(f"Size {size} exceeds max {config.max_order_size}")
+                if count > config.max_order_size:
+                    show_error(f"Count {count} exceeds max {config.max_order_size}")
                     continue
 
-                show_opportunity_detail(opp)
-                if prompt_approval(opp, size, price, "LIMIT"):
+                show_opportunity_detail(opp, idx + 1)
+                if prompt_approval(opp, count):
                     show_info("Placing limit order...")
-                    result = place_limit_order(client, opp, size, price)
-                    show_trade_result(result)
+                    result = place_limit_order(client, opp, count, price_cents)
+                    show_trade_result(result.to_dict())
                 else:
                     show_info("Trade cancelled by user.")
             except (ValueError, IndexError):
-                show_error("Usage: buy <#> [size] [price]")
+                show_error("Usage: buy <#> [count] [price_cents]")
 
         elif cmd == "market-buy":
             try:
@@ -194,21 +202,21 @@ def main():
                     continue
 
                 opp = all_opportunities[idx]
-                amount = float(buy_parts[1]) if len(buy_parts) > 1 else config.default_order_size
+                count = int(buy_parts[1]) if len(buy_parts) > 1 else config.default_order_size
 
-                if amount > config.max_order_size:
-                    show_error(f"Amount {amount} exceeds max {config.max_order_size}")
+                if count > config.max_order_size:
+                    show_error(f"Count {count} exceeds max {config.max_order_size}")
                     continue
 
-                show_opportunity_detail(opp)
-                if prompt_approval(opp, amount, opp.current_price, "MARKET"):
+                show_opportunity_detail(opp, idx + 1)
+                if prompt_approval(opp, count):
                     show_info("Placing market order...")
-                    result = place_market_order(client, opp, amount)
-                    show_trade_result(result)
+                    result = place_market_order(client, opp, count)
+                    show_trade_result(result.to_dict())
                 else:
                     show_info("Trade cancelled by user.")
             except (ValueError, IndexError):
-                show_error("Usage: market-buy <#> [amount]")
+                show_error("Usage: market-buy <#> [count]")
 
         # ---- Orders ----
         elif cmd == "orders":
@@ -228,17 +236,22 @@ def main():
         elif cmd == "cancel-all":
             response = console.input("[yellow]Cancel ALL open orders? (y/N): [/yellow]")
             if response.strip().lower() in ("y", "yes"):
-                if cancel_all_orders(client):
-                    show_success("All orders cancelled.")
-                else:
-                    show_error("Failed to cancel all orders.")
+                count = cancel_all_orders(client)
+                show_success(f"Cancelled {count} orders.")
 
         # ---- Utility ----
+        elif cmd == "balance":
+            try:
+                balance = client.get_balance()
+                show_balance(balance)
+            except Exception as e:
+                show_error(f"Failed to fetch balance: {e}")
+
         elif cmd == "refresh":
             show_info("Refreshing markets...")
-            markets = fetch_all_markets(client)
+            markets = client.fetch_all_markets()
             all_opportunities.clear()
-            market_page = 0
+            market_page = 1
             show_success(f"Reloaded {len(markets)} markets.")
 
         elif cmd == "help":
