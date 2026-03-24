@@ -29,3 +29,4 @@ Thumbs.db
 # Logs
 *.log
 logs/
+kalshi_api_key.pem
