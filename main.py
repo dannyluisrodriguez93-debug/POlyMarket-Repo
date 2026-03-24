@@ -6,6 +6,7 @@ import logging
 
 from kalshi_bot.config import Config
 from kalshi_bot.client import KalshiClient
+from kalshi_bot.demo import DemoKalshiClient
 from kalshi_bot.market_analyzer import (
     analyze_all,
     search_markets,
@@ -109,26 +110,35 @@ def main():
     # Load config
     config = Config.from_env()
     errors = config.validate()
-    if errors:
-        for err in errors:
-            show_error(err)
-        console.print(
-            "\n[dim]Copy .env.example to .env and fill in your credentials.[/dim]"
-        )
-        sys.exit(1)
+    demo_mode = "--demo" in sys.argv
 
-    # Connect and authenticate
-    show_info("Connecting to Kalshi API...")
-    client = KalshiClient(config)
-    try:
-        if client.login():
-            show_success("Authenticated with Kalshi!")
-        else:
-            show_error("Authentication failed. Check your credentials.")
+    if errors and not demo_mode:
+        # No credentials — auto-launch demo mode
+        console.print(
+            "\n[bold yellow]No Kalshi credentials found — launching in DEMO MODE[/bold yellow]"
+        )
+        console.print(
+            "[dim]To trade live, copy .env.example to .env and add your credentials.[/dim]\n"
+        )
+        demo_mode = True
+
+    if demo_mode:
+        client = DemoKalshiClient(starting_balance_cents=50000)
+        client.login()
+        console.print("[bold green]Demo mode active — $500.00 simulated balance[/bold green]")
+    else:
+        # Connect and authenticate
+        show_info("Connecting to Kalshi API...")
+        client = KalshiClient(config)
+        try:
+            if client.login():
+                show_success("Authenticated with Kalshi!")
+            else:
+                show_error("Authentication failed. Check your credentials.")
+                sys.exit(1)
+        except Exception as e:
+            show_error(f"Failed to connect: {e}")
             sys.exit(1)
-    except Exception as e:
-        show_error(f"Failed to connect: {e}")
-        sys.exit(1)
 
     # Initialize strategy state
     balance_cents = _get_balance_cents(client)
